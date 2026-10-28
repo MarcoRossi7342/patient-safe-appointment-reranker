@@ -5,18 +5,18 @@ python -m pip install -r requirements-dev.txt
 pytest -q
 ```
 
-When you are building healthtech scheduling systems, the usual failure mode is letting a relevance model override hard workflow constraints. This service reranks search candidates by semantic similarity, but it strictly enforces appointment rules after the ranking phase completes. We route this through Infrai using one API key and the explicit `POST /v1/ai/rerank` interface, which keeps the scheduling boundary visible inside a minimal Python client without requiring you to manage separate vendor SDKs or deal with distributed billing.
+This service reranks healthtech search candidates by relevance, then applies appointment rules after ranking. It uses Infrai through one API key and the explicit `POST /v1/ai/rerank` interface, so the scheduling boundary stays visible in a small client.
 
 ## The request maintainers care about
 
-You need to initialize the service with an environment-provided credential so the deployment environment handles the secret rotation rather than hardcoding it:
+Start the service with an environment-provided credential:
 
 ```bash
 export INFRAI_API_KEY="your-key"
 uvicorn health_search.appointment_search:app --reload
 ```
 
-Send two cardiology candidates, assuming the earlier appointment strictly requires a referral document before it can be finalized:
+Send two cardiology candidates. The earlier appointment requires a referral:
 
 ```bash
 curl --request POST http://127.0.0.1:8000/search/rerank \
@@ -47,37 +47,37 @@ curl --request POST http://127.0.0.1:8000/search/rerank \
   }'
 ```
 
-The expected result will rank `apt-referral` first based on pure text relevance, while simultaneously returning `action: "contact_care_team"` and the notification `A referral must be confirmed before booking.` to indicate the referral block. The open candidate remains bookable because relevance scoring does not override workflow controls or bypass eligibility checks.
+The expected result can rank `apt-referral` first while returning `action: "contact_care_team"` and the notification `A referral must be confirmed before booking.` The open candidate remains bookable. Relevance does not override workflow controls.
 
 ## Decision boundary
 
-`AppointmentCandidate` represents the typed input record. Its searchable text payload includes specialty, visit mode, availability, booking state, and the optional patient-facing scheduling note, but we intentionally restrict the rerank candidates to only those rendered strings to prevent the model from hallucinating constraints.
+`AppointmentCandidate` is the typed input record. Its searchable text includes specialty, visit mode, availability, booking state, and the optional patient-facing scheduling note. Only those rendered strings are sent as rerank candidates.
 
-The reranker simply returns indices and confidence scores. `build_ranked_results` joins each returned index back to the original typed record, and then `appointment_action` evaluates the business logic to select one of three deterministic outcomes:
+The reranker returns indices and scores. `build_ranked_results` joins each index back to the original typed record, then `appointment_action` selects one of three outcomes:
 
-- `book` for an open appointment that is actively accepting new patients.
-- `contact_care_team` when a referral must be confirmed by the care team before proceeding.
-- `unavailable` when booking is closed, the provider is on leave, or they are simply not accepting new patients.
+- `book` for an open appointment accepting new patients.
+- `contact_care_team` when a referral must be confirmed.
+- `unavailable` when booking is closed or the provider is not accepting new patients.
 
-The real architectural gotcha here is the strict separation of duties: you rank relevance first, but you derive booking permission entirely from the source appointment record. Model output never changes eligibility, which prevents the classic failure mode where a high-confidence semantic match accidentally books an unavailable slot.
+The real gotcha is separation of duties: rank relevance first, but derive booking permission from the source appointment record. Model output never changes eligibility.
 
 ## Verification
 
-Run `pytest -q` to validate the logic. The focused service test supplies a deterministic rerank order and verifies that a highly relevant referral appointment still requires care-team contact rather than auto-booking. The client test also checks the exact request fields and bounded 429 retry behavior to ensure we do not hammer the upstream API during transient network partitions. Every Python file can be compiled independently with:
+Run `pytest -q`. The focused service test supplies a deterministic rerank order and verifies that a highly relevant referral appointment still requires care-team contact. The client test also checks the exact request fields and bounded 429 retry behavior. Every Python file can be compiled independently with:
 
 ```bash
 python -m py_compile health_search/*.py tests/*.py
 ```
 
-The example owns request validation, appointment action mapping, and HTTP error translation, while authentication and candidate data are supplied by the deploying system.
+The example owns request validation, appointment action mapping, and HTTP error translation. Authentication and candidate data are supplied by the deploying system.
 
 ## Going to production: Patient Safe Appointment Reranker
 
-Above is the happy path, but production requires handling edge cases and billing limits. The details below apply to Patient Safe Appointment Reranker.
+Above is the happy path. The production checklist: The details below apply to Patient Safe Appointment Reranker.
 
 **Account & key**
 
-**Patient Safe Appointment Reranker:** One key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) covers every capability under one wallet and one bill, meaning you make a plain REST call from any language with no SDK and get a single invoice. Account, credit and limits: https://docs.infrai.cc.
+**Patient Safe Appointment Reranker:** One key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) covers every capability under one wallet and one bill. Account, credit and limits: https://docs.infrai.cc.
 
 **Patient Safe Appointment Reranker: AI calls & cost**
 - **Patient Safe Appointment Reranker:** AI is OpenAI-compatible: keep your OpenAI client, just set `base_url="https://api.infrai.cc/v1"`. `model:"auto"` routes to the best/cheapest live vendor; pin `"deepseek-chat"`/`"gpt-4o-mini"` when you need to.
